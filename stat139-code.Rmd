@@ -1,0 +1,765 @@
+---
+title: "Stat 139 Final Project Data Cleaning + EDA"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(plyr)
+library(tidyverse)
+library(ggplot2)
+library(Hmisc)
+library(corrplot)
+library(datetime)
+library(rsample)
+library(glmnet)
+library(lme4)
+library(rpart)
+library(randomForest)
+```
+
+# Reading in Relevant Data
+```{r}
+# Reading in data from March, April, May from 2018, 2019, 2020
+ride1803 = read.csv("Desktop/StatProjectData/201803_hubway_tripdata.csv")
+ride1804 = read.csv("Desktop/StatProjectData/201804-hubway-tripdata.csv")
+ride1805 = read.csv("Desktop/StatProjectData/201805-bluebikes-tripdata.csv")
+ride1903 = read.csv("Desktop/StatProjectData/201903-bluebikes-tripdata.csv")
+ride1904 = read.csv("Desktop/StatProjectData/201904-bluebikes-tripdata.csv")
+ride1905 = read.csv("Desktop/StatProjectData/201905-bluebikes-tripdata.csv")
+ride2003 = read.csv("Desktop/StatProjectData/202003-bluebikes-tripdata.csv")
+ride2004 = read.csv("Desktop/StatProjectData/202004-bluebikes-tripdata.csv")
+ride2005 = read.csv("Desktop/StatProjectData/202005-bluebikes-tripdata.csv")
+weather = read.csv("Desktop/StatProjectData/Weather.csv")
+stations = read.csv("Desktop/StatProjectData/current_bluebikes_stations.csv", stringsAsFactors = FALSE)
+stations = subset(stations, select = c("Name", "District", "Total.docks"))
+
+# Create ride dataframe
+ride = rbind.fill(ride1803, ride1804, ride1805, ride1903,
+                  ride1904, ride1905, ride2003, ride2004, ride2005)
+ride$start.station.id = factor(ride$start.station.id)
+ride$end.station.id = factor(ride$end.station.id)
+ride$starttime = substr(ride$starttime, 1, 10)
+ride$starttime = factor(ride$starttime)
+ride$stoptime = substr(ride$stoptime, 1, 10)
+ride$stoptime = factor(ride$stoptime)
+ride$startyear = factor(substr(ride$starttime, 1, 4))
+ride$startmonth = factor(substr(ride$starttime, 6, 7))
+ride$startday = factor(substr(ride$starttime, 9, 10))
+ride$startmonthday = factor(substr(ride$starttime, 6, 10))
+ride$stopyear = factor(substr(ride$stoptime, 1, 4))
+ride$stopmonth = factor(substr(ride$stoptime, 6, 7))
+ride$stopday = factor(substr(ride$stoptime, 9, 10))
+ride$stopmonthday = factor(substr(ride$stoptime, 6, 10))
+```
+
+# Merging Ride data with Weather data
+```{r}
+# Data of stations from which bikes were rented
+start = ddply(ride, .(ride$starttime, ride$start.station.id, ride$start.station.name), nrow)
+names(start) <- c("starttime", "start.station.id", "Name", "freq")
+start$year = factor(substr(start$starttime, 1, 4))
+start$month = factor(substr(start$starttime, 6, 7))
+start$day = factor(substr(start$starttime, 9, 10))
+
+# Creating weather dataframe
+weather$year = factor(weather$year)
+weather$month = factor(weather$month)
+weather$day = factor(weather$day)
+weather$month = mapvalues(weather$month, from = c("3", "4", "5"), to = c("03", "04", "05"))
+weather$day = mapvalues(weather$day, from = c("1", "2", "3", "4", "5", "6", "7", "8", "9"),
+          to = c("01", "02", "03", "04", "05", "06", "07", "08", "09"))
+
+# Merge start data with weather
+startdata = merge(start, weather, by = c("year", "month", "day"))
+
+# Save start and stop data as csv files
+# write.csv(startdata, "StatProjectData/startdata.csv")
+# write.csv(stopdata, "StatProjectData/stopdata.csv")
+```
+
+# Group data simply by day, not stations
+```{r}
+# Second dataframe of start grouped by day
+start2 = ddply(ride, .(ride$starttime), nrow)
+names(start2) <- c("starttime", "freq")
+start2$year = factor(substr(start2$starttime, 1, 4))
+start2$month = factor(substr(start2$starttime, 6, 7))
+start2$day = factor(substr(start2$starttime, 9, 10))
+
+# Merge second start and stop datasets with weather
+start2 = merge(start2, weather, by = c("year", "month", "day"))
+```
+
+# Adding District Column and Transforming
+```{r}
+# Adding District Column
+start3 = merge(startdata, stations, by = "Name", all.x = TRUE)
+start3$District[is.na(start3$District)] = "Other"
+start3$Total.docks[is.na(start3$Total.docks)] = 0
+
+start3$year = factor(substr(start3$starttime, 1, 4))
+start3$month = factor(substr(start3$starttime, 6, 7))
+start3$day = factor(substr(start3$starttime, 9, 10))
+
+# Remove Everett -- only installed in 2020
+start3 = start3[start3$District != "Everett",]
+
+# Creating Weekends!
+start3$starttime = as.Date(start3$starttime)
+start3$weekend = as.factor(weekdays(start3$starttime) %in% c("Saturday", "Sunday"))
+
+# Creating Transformed Dataframe
+start3.t <- data.frame(year = start3$year, month = start3$month, day=start3$day, 
+                       starttime = start3$starttime, weekend=start3$weekend, 
+                       district = start3$District, docks=start3$Total.docks)
+
+start3.t$log.freq <- log(start3$freq)
+start3.t$sqrt.temp <- sqrt(start3$temperature.f)
+start3.t$dewpoint <- start3$dewpoint
+start3.t$humidity <- start3$humidity
+start3.t$log.windspeed <- log(start3$windspeed)
+
+start3.t$pressure  <- start3$pressure
+
+# Creating Precipitation Categories
+start3 <- start3 %>%
+  mutate(precipitation.category = case_when(
+    precipitation.inch == 0 ~ "None",
+    precipitation.inch <= .13 ~ "Low",
+    precipitation.inch > 0.13 ~ "High"
+  ))
+
+start3.t$precip <- start3$precipitation.category
+#head(start3.t)
+```
+
+# Grouping by District and Transforming
+```{r}
+names(ride)[names(ride) == "start.station.name"] = "Name"
+start4 = merge(ride, stations[,1:2], by = "Name", all.x = TRUE)
+start4$District[is.na(start4$District)] = "Other"
+start4.t = ddply(start4, .(start4$starttime, start4$District), nrow)
+names(start4.t) <- c("starttime", "district", "freq")
+start4.t$year = factor(substr(start4.t$starttime, 1, 4))
+start4.t$month = factor(substr(start4.t$starttime, 6, 7))
+start4.t$day = factor(substr(start4.t$starttime, 9, 10))
+start4.t = merge(start4.t, weather, by = c("year", "month", "day"))
+
+# Weekends
+start4.t$starttime = as.Date(start4.t$starttime)
+start4.t$weekend = as.factor(weekdays(start4.t$starttime) %in% c("Saturday", "Sunday"))
+
+start4.t$log.freq <- log(start4.t$freq)
+start4.t$sqrt.temp <- sqrt(start4.t$temperature.f)
+start4.t$dewpoint <- start4.t$dewpoint
+start4.t$humidity <- start4.t$humidity
+start4.t$log.windspeed <- log(start4.t$windspeed)
+start4.t$pressure  <- start4.t$pressure
+
+# Precipitation
+start4.t <- start4.t %>%
+  mutate(precipitation.category = case_when(
+    precipitation.inch == 0 ~ "None",
+    precipitation.inch <= .13 ~ "Low",
+    precipitation.inch > 0.13 ~ "High"
+  ))
+
+start4.t$precip <- start4.t$precipitation.category
+
+start4.t <- data.frame(year = start4.t$year, month = start4.t$month, day=start4.t$day, starttime = start4.t$starttime, weekend=start4.t$weekend, district = start4.t$district, log.freq = start4.t$log.freq, sqrt.temp = start4.t$sqrt.temp, dewpoint = start4.t$dewpoint, humidity = start4.t$humidity, log.windspeed = start4.t$log.windspeed, pressure = start4.t$pressure, precip = start4.t$precip)
+```
+
+# Creating Train and Test Sets
+```{r}
+# set.seed(139245)
+split <- initial_split(start3.t, prob = 0.8)
+start3.t.train <- training(split)
+start3.t.test<- testing(split)
+
+split <- initial_split(start4.t, prob = 0.8)
+start4.t.train <- training(split)
+start4.t.test<- testing(split)
+```
+
+# Variable Transformations
+```{r}
+# Station Frequency
+hist(start3$freq, main="Station Frequency")
+hist(start3.t$log.freq, main="Log Station Frequency")
+
+# Original Daily Frequency
+hist(start2$freq, main = "Daily Frequency")
+# Transformed (sqrt)
+hist(sqrt(start2$freq), main = "sqrt(Daily Frequency)")
+
+# Original Temperature
+hist(start2$temperature.f, main = "Temperature (F)")
+# Transformed (sqrt)
+hist(sqrt(start2$temperature.f), main = "sqrt(Temperature) (F)")
+
+# Original Dew Point
+hist(start2$dewpoint, main = "Dew Point (F)")
+# Transformed (none)
+
+# Original Humidity
+hist(start2$humidity, main = "Humidity (%)")
+# Transformed (none)
+
+# Original Wind Speed
+hist(start2$windspeed, main="Wind Speed (mph)")
+# Transformed (log)
+hist(log(start2$windspeed), main="Log(Wind Speed) (mph)")
+
+# Original Pressure
+hist(start2$pressure, main="Pressure (Hg)")
+# Transformed (none)
+
+# Original Precipitation
+hist(start2$precipitation.inch, main="Precipitation (in)")
+# Transformed (log)
+hist(log(start2$precipitation.inch), main="log(Precipitation) (in)")
+```
+
+# Variable Inclusion Considerations
+```{r}
+# Possible predictor variables
+start2.weather <- start2[,c('temperature.f', 'dewpoint', 'humidity', 
+                            'windspeed', 'pressure', 'precipitation.inch')]
+
+# Create correlation object
+corr.weather <-rcorr(as.matrix(start2.weather))
+
+# Create correlation matrix
+corrplot(corr.weather$r, type="upper", order="hclust", 
+         p.mat = corr.weather$P, sig.level = 0.01, insig = "blank")
+
+# Correlation matrix shows high correlation between dewpoint/temp, dewpoint/humidity, pressure/precip and pressure/windspeed
+
+# Create binary variable for precipitation
+start2$precip.binary = as.factor(start2$precipitation.inch == 0.0)
+
+# Create linear model to determine frequency from binary precipitation
+model.precip = lm(sqrt(freq) ~ precip.binary, data = start2)
+
+# Plot precipitation and frequency
+plot(sqrt(freq) ~ precip.binary, data = start2[start2$year %in% c(2018, 2019), ], main =
+       "Sqrt(Frequency) vs Rain for 2018, 2019")
+
+# There doesn't seem to be a difference in frequency from when it does/not rain! 
+# Don't need to include this variable in linear modeling
+
+# Information about binary precipitation model
+summary(model.precip)
+```
+
+# Data Exploration Models
+```{r}
+# Create simple linear model for freq vs temp
+model1 = lm(sqrt(freq) ~ sqrt(temperature.f), data = start2)
+
+# Plot freq vs temp
+plot(sqrt(freq) ~ sqrt(temperature.f),
+     data = start2,
+     main = "Sqrt(Frequency) vs Sqrt(Temperature)")
+abline(model1, col = "red")
+
+# Model 1 Summary
+summary(model1)
+
+# Model 1 Assumptions
+plot(model1)
+```
+
+```{r}
+# Linear model incl. year
+model_year <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + 
+    year, data = start2)
+
+# Model 2 Summary
+summary(model_year)
+
+# Model 2 Assumptions
+# plot(model_year)
+```
+
+```{r}
+# Linear model
+model2 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed), 
+    data = start2)
+
+# Model 2 Summary
+summary(model2)
+
+# Model 2 Assumptions
+# plot(model2)
+```
+
+```{r}
+# Plot frequency vs year
+plot(sqrt(freq)~year, data = start2, main="Sqrt(Frequency) vs Year")
+
+# There is a clear decline in 2020 frequency
+
+# Adding in Year variable as well
+model3 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + 
+    year, data = start2)
+
+# Model 3 Summary
+summary(model3)
+
+# Model 3 Assumptions
+# plot(model3)
+```
+
+```{r}
+# Scatterplot of biking frequency
+ggplot(start2, aes(x=temperature.f, y = freq, color = year)) +
+  geom_point() +
+  labs(x = "Temperature",
+       y = "Frequency",
+       title = "Biking Frequency by Temperature") 
+
+# Plot frequency vs month
+plot(sqrt(freq)~month, data = start2, main="Sqrt(Frequency) vs Year")
+
+# Adding Month variable
+model4 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + 
+    year + month, data = start2)
+
+# Model 4 Summary
+summary(model4)
+
+# Model 4 Assumptions
+# plot(model4)
+```
+
+```{r}
+# Full Model for Year 2018, 2019 and Month
+
+# Linear model only taking a look at years 2018 and 2019
+model5 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + 
+    year + month, data = start2[start2$year %in% c("2018", "2019"), 
+    ])
+
+# Model 5 Summary
+summary(model5)
+
+# Model 5 Assumptions
+plot(model5)
+```
+
+```{r}
+# Graph of frequency by month
+# if invalid knit from trim error, run this chunk
+start2$graph = as.Date(format(start2$starttime, "%m/%d"),format="%m/%d")
+ggplot(start2, aes(x=graph, y = freq, color = year, size=temperature.f)) +
+  # scale_x_datetime(date_breaks = "1 month")+
+  geom_point(alpha = 0.5) + 
+  geom_smooth(lm = TRUE, alpha = 0.2, method = "loess") +
+  theme_bw() +
+  # geom_line()
+  labs(x = "Date",y = "Frequency",title = "Biking Frequency by Date")
+```
+
+```{r}
+# Full Model for Year 2020 and Month 
+model6 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + 
+    month, data = start2[start2$year %in% c("2020"), ])
+
+# Model 6 Summary
+summary(model6)
+
+# Model 6 Assumptions
+# plot(model6)
+```
+
+```{r}
+# Creating Weekends for start2!
+start2$starttime = as.Date(start2$starttime)
+start2$weekend = as.factor(weekdays(start2$starttime) %in% c("Saturday", "Sunday"))
+```
+
+```{r}
+# Graph with Weekend Data
+ggplot(start2, aes(x=graph, y = freq, color = year)) +
+  facet_wrap(~weekend) +
+  # scale_x_datetime(date_breaks = "1 month")+
+  geom_point(alpha = 0.8) + 
+  geom_smooth(lm = TRUE, alpha = 0.2, method = "loess", size = 0.5) +
+  # scale_shape_manual(values=c(16, 1)) +
+  theme_bw() +
+  labs(x = "Date",y = "Frequency",title = "Biking Frequency by Date",
+       subtitle = "Frequency Subsetted by Weekend")
+```
+
+```{r}
+# Full Model for weekends in 2018, 2019
+model7 <-lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + month + weekend, 
+            data = start2[start2$year %in% c("2018", "2019"),] )
+
+# Model 7 Summary
+summary(model7)
+
+# Model 7 Assumptions
+plot(model7)
+
+# Full Model for weekends in 2020
+model8 <- lm(formula = sqrt(freq) ~ sqrt(temperature.f) + humidity + log(windspeed) + month + weekend,
+             data = start2[start2$year %in% c("2020"),])
+
+# Model 8 Summary
+summary(model8)
+
+# Model 8 Assumptions
+plot(model8)
+```
+
+# Baseline Models
+```{r}
+# Transforming new data frame start.t
+start.t <- data.frame(year = start2$year, month = start2$month, day=start2$day, starttime = start2$starttime, weekend=start2$weekend)
+
+start.t$sqrt.freq <- sqrt(start2$freq)
+start.t$sqrt.temp <- sqrt(start2$temperature.f)
+start.t$dewpoint <- start2$dewpoint
+start.t$humidity <- start2$humidity
+start.t$log.windspeed <- log(start2$windspeed)
+start.t$pressure  <- start2$pressure
+
+start2 <- start2 %>%
+  mutate(precipitation.category = case_when(
+    precipitation.inch == 0 ~ "None",
+    precipitation.inch <= .13 ~ "Low",
+    precipitation.inch > 0.13 ~ "High"
+  ))
+
+start.t$precip <- start2$precipitation.category
+```
+
+```{r}
+# Investigating terms by district
+# Weather effects
+plot(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Boston",], 
+     col="red", ylim=c(0,9), main = "Log Frequency of Bike Share by District")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Cambridge",], col="blue")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Brookline",], col="green")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Somerville",])
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Other",], col="cyan")
+
+plot(log.freq ~ pressure, data=start4.t[start4.t$district=="Boston",], 
+     col="red", ylim=c(0,9), main = "Log Frequency of Bike Share by District")
+points(log.freq ~ pressure, data=start4.t[start4.t$district=="Cambridge",], col="blue")
+points(log.freq ~ pressure, data=start4.t[start4.t$district=="Brookline",], col="green")
+points(log.freq ~ pressure, data=start4.t[start4.t$district=="Somerville",])
+points(log.freq ~ pressure, data=start4.t[start4.t$district=="Other",], col="cyan")
+
+plot(log.freq ~ log.windspeed, data=start4.t[start4.t$district=="Boston",], 
+     col="red", ylim=c(0,9), main = "Log Frequency of Bike Share by District")
+points(log.freq ~ log.windspeed, data=start4.t[start4.t$district=="Cambridge",], col="blue")
+points(log.freq ~ log.windspeed, data=start4.t[start4.t$district=="Brookline",], col="green")
+points(log.freq ~ log.windspeed, data=start4.t[start4.t$district=="Somerville",])
+points(log.freq ~ log.windspeed, data=start4.t[start4.t$district=="Other",], col="cyan")
+
+# Time-Based Effects
+plot(log.freq ~ starttime, data=start4.t[start4.t$district=="Boston",], 
+     col="red", ylim=c(0,9), main = "Log Frequency of Bike Share by District")
+points(log.freq ~ starttime, data=start4.t[start4.t$district=="Cambridge",], col="blue")
+points(log.freq ~ starttime, data=start4.t[start4.t$district=="Brookline",], col="green")
+points(log.freq ~ starttime, data=start4.t[start4.t$district=="Somerville",], col="black")
+points(log.freq ~ starttime, data=start4.t[start4.t$district=="Other",], col="cyan")
+
+# we can see that there are significant differences across districts
+```
+
+```{r}
+# Remove stops with 0 bikes (closed stops)
+train = start3.t.train[start3.t.train$docks > 0,]
+test = start3.t.test[start3.t.test$docks > 0,]
+```
+
+```{r}
+# Preliminary models
+fullmodel <- lm(log.freq ~ .-day -starttime -dewpoint
+                ,data=train, weights=docks)
+model.int <-lm(log.freq ~ (.-day -starttime -district -docks -dewpoint) + year*(month + weekend)
+                 ,data=train, weights=docks)
+# model.moreint = lm(log.freq ~ (.-day -starttime -district -docks -dewpoint) + (month + weekend) * year
+#               + (sqrt.temp+pressure+log.windspeed+dewpoint+humidity+precip)^2
+#               ,data = train, weights=docks)
+model.dist = lm(log.freq ~ (.-day -starttime -docks -dewpoint) + (month + weekend) * year
+               + (month + weekend + year) * district -district
+               ,data = train, weights=docks)
+model.moredist = lm(log.freq ~ (.-day -starttime -docks -dewpoint) * district
+                   + (month + weekend) * year -district
+               ,data = train, weights=docks)
+
+anova(fullmodel, model.int, model.dist, model.moredist)
+anova(fullmodel, model.dist)
+anova(model.dist, model.moredist)
+```
+
+```{r}
+# Find better model
+AIC(fullmodel, model.int, model.dist, model.moredist)
+BIC(fullmodel, model.int, model.dist, model.moredist)
+``` 
+
+```{r}
+# MSE function
+MSE =function(model,newdata,y){
+  yhat=predict(model,newdata=newdata)
+  MSE =sum((y-yhat)^2)/nrow(newdata)
+  return(MSE)
+}
+
+# MSEs on training data
+train.MSE = c(MSE(fullmodel, train, train$log.freq),
+MSE(model.dist, train, train$log.freq),
+MSE(model.moredist, train, train$log.freq))
+
+# MSEs on testing data
+test.MSE = c(MSE(fullmodel, test, test$log.freq),
+MSE(model.dist, test, test$log.freq),
+MSE(model.moredist, test, test$log.freq))
+
+data.frame(Names=c("fullmodel","model.dist", "model.moredist"),
+           Train.MSE = train.MSE, Test.MSE = test.MSE,
+           Difference = abs(test.MSE - train.MSE))
+# looks good
+
+plot(model.dist)
+plot(model.moredist)
+```
+
+```{r}
+# LASSO for dist
+library(glmnet)
+set.seed(139)
+y = train$log.freq
+X = model.matrix(model.dist)[,-1]
+min.lambda = cv.glmnet(X, y, alpha = 1, nfolds=20)$lambda.min
+lasso = glmnet(X, y,alpha =1,lambda=min.lambda,standardize =T); #lasso$beta
+betas = names(coef(model.dist))[which(coef(lasso)==0)]; betas
+
+# MSEs
+X.train = model.matrix(lm(formula(model.dist), data = train))[, -1]
+train_predicts = predict(lasso, newx = X.train)
+train.d = mean((train$log.freq-train_predicts)^2)
+X.test = model.matrix(lm(formula(model.dist), data = test))[, -1]
+test_predicts = predict(lasso, newx = X.test)
+test.d = mean((test$log.freq-test_predicts)^2)
+
+# LASSO for moredist
+set.seed(139)
+y = train$log.freq
+X = model.matrix(model.moredist)[,-1]
+min.lambda = cv.glmnet(X, y, alpha = 1, nfolds=20)$lambda.min
+lasso = glmnet(X, y,alpha =1,lambda=min.lambda,standardize =T); #lasso$beta
+betas = names(coef(model.moredist))[which(coef(lasso)==0)]; betas
+
+# MSEs
+X.train = model.matrix(lm(formula(model.moredist), data = train))[, -1]
+train_predicts = predict(lasso, newx = X.train)
+train.more = mean((train$log.freq-train_predicts)^2)
+X.test = model.matrix(lm(formula(model.moredist), data = test))[, -1]
+test_predicts = predict(lasso, newx = X.test)
+test.more = mean((test$log.freq-test_predicts)^2)
+
+# looks like dist is more predictive!
+# interesting because moredist has more factors
+```
+
+```{r}
+data.frame(LASSO.baseline = c("model.dist", "model.moredist"),
+           Train.MSE = c(train.d, train.more),
+           Test.MSE = c(test.d, test.more),
+           Difference = abs(c(train.d - test.d, train.more - test.more)))
+```
+
+# Random Forest
+```{r}
+#evaluate performance on trian and test
+RMSE = function(y,yhat){
+  SSE =sum((y-yhat)^2)
+  return(sqrt(SSE/length(y)))
+}
+```
+
+```{r}
+set.seed(139)
+NUM_PRED = 10
+MAX_NODES = c(2, 4, 6, 8, 10, 15, 20)
+rmses = data.frame(matrix(nrow=NUM_PRED, ncol=12))
+rmses.test = data.frame(matrix(nrow=NUM_PRED, ncol=12))
+colnames(rmses) = MAX_NODES
+rownames(rmses) = 1:10
+colnames(rmses.test) = MAX_NODES
+rownames(rmses.test) = 1:10
+
+for (i in 1:NUM_PRED){
+  for (j in 1:length(MAX_NODES)){
+      # iterate over all predictors
+      rf = randomForest(log.freq ~(.-day-starttime),data=train2,mtry = i, maxnodes=MAX_NODES[j])
+      rmses[i, j] = round(RMSE(train2$log.freq, predict(rf)), 5)
+  }
+}
+for (i in 1:NUM_PRED){
+  for (j in 1:length(MAX_NODES)){
+      # iterate over all predictors
+      rf = randomForest(log.freq ~(.-day-starttime),data=test2,mtry = i, maxnodes=MAX_NODES[j])
+      rmses.test[i, j] = round(RMSE(test2$log.freq, predict(rf)), 5)
+  }
+}
+rmses
+rmses.test
+abs(rmses-rmses.test)
+# best is 10 nodes and 7 pred with Percentage of Variance explained about 82%
+rf = randomForest(log.freq ~(.-day-starttime),data=train2,mtry = 7, maxnodes=10)
+rftest = randomForest(log.freq ~(.-day-starttime),data=test2,mtry = 7, maxnodes=10)
+varImpPlot(rf, main = "Random Forest Variable Importance")
+```
+
+```{r}
+# rmses with i=7 predictors and j=10 max nodes is the best
+dummyx = seq(min(train2$sqrt.temp), max(train2$sqrt.temp), 0.1)
+dummy_df = train2
+plot(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Boston",], 
+     col="red", ylim=c(0,9), main = "Random Forest Predictions for Frequency")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Cambridge",], col="blue")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Brookline",], col="green")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Somerville",], col="black")
+points(log.freq ~ sqrt.temp, data=start4.t[start4.t$district=="Other",], col="cyan")
+yhats = matrix(NA, nrow(dummy_df), ncol = length(dummyx))
+for(i in 1:nrow(dummy_df)){
+  rows = dummy_df[rep(i, length(dummyx)),]
+  rows$sqrt.temp = dummyx
+  yhat = predict(rf, new = rows)
+  yhats[i,] = yhat
+  lines(yhat~dummyx, col = rgb(0.5, 0, 0, 0.08), lwd = 1, lty = 1)
+}
+mean_yhat = apply(yhats, 2, mean)
+lines(mean_yhat~dummyx, col = "red", lwd = 5)
+```
+
+# Main Hypothesis: Mixed Effect Predictive Model
+# We only continue with lmer2.2 since that is the only one that converges
+```{r}
+# fixed intercept, random slope
+lmer2.1 = lmer(log.freq ~ 1 + (.-day -starttime -district -docks -year -dewpoint)
+             +(year|district)
+             ,data = train, weight=docks,
+             control =lmerControl(optCtrl=list(maxfun=50000)))
+# lmer2.1 doesn't converge so we don't consider it 
+
+# random intercept, non-random slope
+lmer2.2 = lmer(log.freq ~ 1 + (.-day -starttime -district -docks -dewpoint)
+             +(1|district)
+             ,data = train, weight=docks,
+             control =lmerControl(optCtrl=list(maxfun=50000)))
+# only lmer2.2 converges out of all mixed effects
+
+# random intercept, random slope
+lmer2.3 = lmer(log.freq ~ 1 + (.-day -starttime -district -docks -dewpoint)
+             +(1+year|district)
+             ,data = train, weight=docks)
+# lmer2.3 does not converge
+```
+
+```{r}
+# Lmer 2.2 is not significant compared to other models
+AIC(lmer2.2, model.dist)
+anova(lmer2.2, model.dist)
+# anova not showing statistically significant improvement despite lower AIC
+# so we can assume that our lm model.dist and lasso models are most predictive overall
+
+# very low ICC
+variances =c((summary(lmer2.2)$varcor)$district[[1]],summary(lmer2.2)$sigma^2)
+icc = variances[1]/sum(variances); print("ICC: "); icc
+```
+
+# Lockdown Fatigue I. Linear and Quadratic OLS Models
+```{r}
+# Introduce new variable, cov19 = days since lockdown restrictions
+train$cov19 = as.integer(train$starttime-as.Date('2020-03-10', format="%Y-%m-%d"))
+train$cov19[train$cov19 < 0] = 0
+test$cov19 = as.integer(test$starttime-as.Date('2020-03-10', format="%Y-%m-%d"))
+test$cov19[test$cov19 < 0] = 0
+```
+
+```{r}
+# use weather variables in order to hold weather factors constant and avoid confounding effects
+# linear model with weather args
+linear = lm(log.freq ~ (.-year -month -day -weekend -starttime) + 1+ cov19,
+            data=train, weights=docks)
+
+# quadratic, weather still constant
+quad = lm(log.freq ~ (.-year -month -day -weekend -starttime) + 1 + cov19 + I(cov19^2),
+            data=train, weights=docks)
+```
+
+```{r}
+# Comparing Models - we choose quadratic model
+
+# MSEs on train
+MSE(linear, train, train$log.freq)
+MSE(quad, train, train$log.freq)
+
+# MSEs on test
+MSE(linear, test, test$log.freq)
+MSE(quad, test, test$log.freq)
+
+# quad has lower MSE => better model!!
+anova(quad, linear)
+``` 
+
+```{r}
+# Interpeting 
+summary(quad)
+# wow!! that cov19^2 term is super significant :) looks like an upwards facing parabola!
+```
+
+```{r}
+# assumptions look fine
+plot(linear)
+plot(quad)
+```
+
+# Lockdown Fatigue II Mixed Effects Modeling
+```{r}
+# only random intercept
+lmerq.1 = lmer(log.freq ~ scale(docks) + scale(sqrt.temp) + scale(dewpoint)
+               + scale(humidity) + scale(log.windspeed) + scale(pressure)
+               + precip + poly(cov19, deg=2, raw=F) + (1|district)
+               , data=train, weights=docks )
+
+# # random intercept + linear
+# lmerq.2 = lmer(log.freq ~ (.-year -month -day -starttime) + cov19 + I(cov19^2)
+#                  +(1+cov19|district)
+#             ,data=train, weights=docks)
+#
+# this model doesn't converge so we don't consider it
+
+# random slope, random intercept 
+lmerq.3 = lmer(log.freq ~ scale(docks) + scale(sqrt.temp) + scale(dewpoint)
+               + scale(humidity) + scale(log.windspeed) + scale(pressure)
+               + precip + poly(cov19, deg=2, raw=F)
+               + (1+poly(cov19, deg=2, raw=F)||district)
+               , data=train, weights=docks )
+
+anova(lmerq.3, lmerq.1)
+```
+
+```{r}
+# Comparing Models - we choose lmerq.3
+AIC(lmerq.1, lmerq.3, quad, linear)
+anova(lmerq.3, quad)
+``` 
+
+```{r}
+# Interpreting final mixed model 
+summary(lmerq.3)
+
+# Looking at each District
+coef(lmerq.3)$district[c('(Intercept)','poly(cov19, deg = 2, raw = F)1','poly(cov19, deg = 2, raw = F)2')]
+```
